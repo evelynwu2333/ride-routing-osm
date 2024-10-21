@@ -1,7 +1,9 @@
 import streamlit as st
-import routing
 import folium
-from streamlit_folium import folium_static
+from streamlit_folium import st_folium
+from folium.plugins import Draw
+import osmnx as ox
+from pyproj import Proj
 
 # Initialize session state
 if "start_coords" not in st.session_state:
@@ -10,66 +12,91 @@ if "start_coords" not in st.session_state:
 if "end_coords" not in st.session_state:
     st.session_state.end_coords = None
 
-if "clicked_coords" not in st.session_state:
-    st.session_state.clicked_coords = []
-
+# if "clicked_coords" not in st.session_state:
+#     st.session_state.clicked_coords = []
+if "user_input" not in st.session_state:
+    st.session_state.user_input = []
 # Title and Instructions
 st.title("Bike route web app")
 st.write("Input origin and destination for bike-friendly routes:")
 
-# create map
-m = folium.Map(center = [-35.28, 149.13], zoom_start = 12)
+# # add marker
+# folium.Marker([0, 0], popup=None, icon=None, draggable=False).add_to(m)
+# m.add_child(folium.LatLngPopup())
 
-# click handler on map
-def handle_click(event):
-    lat = event.latlng[0]
-    lon = event.latlng[1]
-    st.session_state.clicked_coords.append((lat, lon))
-    # update marker
-    folium.Marker([lat, lon]).add_to(m)
+# Download the bike-specific street network from OSM
+@st.cache_data
+def get_bike_routes(place="ACT, Australia"):
+    G = ox.graph_from_place(place, network_type='bike', simplify=True)
+    # get a GeoSeries of consolidated intersections
+    G_proj = ox.project_graph(G)
+    G2 = ox.consolidate_intersections(G_proj)
+    return G2
 
-# add marker
-folium.Marker([0, 0], popup=None, icon=None, draggable=False).add_to(m)
-m.add_child(folium.LatLngPopup())
+# get 3 shortest bike routes
+def select_routes(origin_point, destination_point):
 
-# display map
-folium_static(m, width = 800, height = 600)
+    # Set up your UTM projection for ACT (Zone 55S)
+    proj_utm = Proj(proj='utm', zone=55, south=True, ellps='WGS84')
+    x1, y1 = proj_utm(origin_point[0], origin_point[1])
+    x2, y2 = proj_utm(destination_point[0], destination_point[1])
 
-if st.button("Select Origin"):
-    if len(st.session_state.clicked_coords) > 0:
-        start_coords = st.session_state.clicked_coords[-1]
-        st.session_state.start_coords = start_coords
-        st.write("Origin selected:", start_coords)
+    orig_node = ox.nearest_nodes(Gp, x1, y1)
+    dest_node = ox.nearest_nodes(Gp, x2, y2)
+    # find the shortest path (by distance) between these nodes then plot it
+    routes = ox.k_shortest_paths(G2, orig_node, dest_node, k=3, weight="length")
+    route_list = list(routes)
 
-if st.button("Select Destination"):
-    if len(st.session_state.clicked_coords) > 0:
-        end_coords = st.session_state.clicked_coords[-1]
-        st.session_state.end_coords = end_coords
-        st.write("Destination selected:", end_coords)
+    route_coords=[]
+    for i, route in enumerate(route_list):
+        route_gdf = ox.routing.route_to_gdf(G2, route)
+        # route_length = route_gdf["length"].sum()
+        # print(f"Length of route {i+1}: {route_length} meters")
 
-if st.session_state.start_coords is not None:
-    st.write("Origin coordinates:", st.session_state.start_coords)
+        # Extract the coordinates of the route
+        coords = [(point.xy[1][0], point.xy[0][0]) for point in route_gdf.geometry]  # (lat, lon) format
+        
+        route_coords.append(coords)
 
-if st.session_state.start_coords is not None and st.session_state.end_coords is not None:
-    st.write(f"Origin coordinates: {st.session_state.start_coords} Destination coordinates: {st.session_state.end_coords}")
+    return route_coords
 
-    routes = routing.get_bike_friendly_routes(start_coords, end_coords)
-    routes[0].add_to(m)
-    routes[1].add_to(m)
-    routes[2].add_to(m)
 
-# # show selected origin and destination points
-# if len(clicked_points) == 2:
-#     st.write(f"Selected Origin: {clicked_points[0]}")
-#     st.write(f"Selected Destination: {clicked_points[1]}")
+with st.form(key='myform'):
 
-#     origin = clicked_points[0]
-#     destination = clicked_points[1]
+    # create map
+    m = folium.Map(center = [-35.28, 149.13])
+    Draw(export=True, draw_options={
+        'polyline': False,
+        'polygon': False,
+        'circle': False,
+        'circlemarker': False,
+        'rectangle': False,
+        'marker': True
+    }).add_to(m)
+    # display map
+    output = st_folium(m, width = 800, height = 600, zoom = 12, returned_objects=['all_drawings'])
+    
+    submit = st.form_submit_button("Find Path")
 
-#     routes = routing.get_bike_friendly_routes(origin, destination)
+# st.write(st.session_state.user_input)
+if submit:
+    if len(output['all_drawings']) >= 2:
+        st.session_state.user_input = output['all_drawings']
+        st.session_state.start_coords = st.session_state.user_input[0]['geometry']['coordinates']
+        st.write(st.session_state.start_coords)
+        st.session_state.end_coords = st.session_state.user_input[1]['geometry']['coordinates']
+        st.write(st.session_state.end_coords)
 
-#     m.Add.ppolyline(routes[0])
-#     m.Add.ppolyline(routes[1])
-#     m.Add.ppolyline(routes[2])
+        G2 = get_bike_routes(place="ACT, Australia")
+        Gp = ox.project_graph(G2)
+        routes = select_routes(st.session_state.start_coords, st.session_state.end_coords)
 
-#     m.to_streamlit(height=700)
+        for i, route in enumerate(routes):
+            folium.PolyLine(route, color=["red", "blue", "green"][i], weight=5, opacity=0.7, popup=f'Route {i+1}').add_to(m)
+        
+        # Add markers for the origin and destination
+        folium.Marker(location=st.session_state.start_coords, popup='Origin').add_to(m)
+        folium.Marker(location=st.session_state.end_coords, popup='Destination').add_to(m)
+        st_folium(m)
+    else:
+        st.write('Please select origin and destination')   
